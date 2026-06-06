@@ -70,36 +70,46 @@ server.listen(PORT, () => {
 });
 
 function renderAdminHTML(token) {
-    return `
+  return `
     <!DOCTYPE html>
     <html>
-    <head><title>Render WSS Shell</title></head>
-    <body style="background:#111; color:#0f0; font-family:monospace; padding:20px;">
-      <h3>常驻内存 WSS 远程控制台 (0延迟版)</h3>
-      <div id="output" style="white-space:pre-wrap; height:75vh; overflow-y:auto; border:1px solid #333; padding:10px; margin-bottom:10px;">[系统] 正在建立 WSS 安全连接...</div>
-      <input id="cmd" style="width:80%; background:#222; color:#0f0; border:1px solid #444; padding:5px;" placeholder="输入命令后回车..." autofocus/>
+    <head>
+      <title>Render Professional WebSSH</title>
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/css/xterm.min.css" />
+      <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js"></script>
+    </head>
+    <body style="background:#111; margin:0; padding:10px; height:100vh; box-sizing:border-box;">
+      <div id="terminal" style="height:100%;"></div>
+
       <script>
         const token = "${token}";
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(\`\${protocol}//\${location.host}?role=admin&token=\${token}\`);
         
-        const output = document.getElementById('output');
-        const cmdInput = document.getElementById('cmd');
+        // 初始化专业终端
+        const term = new Terminal({
+          cursorBlink: true,
+          theme: { background: '#111111', foreground: '#00ff00' },
+          fontFamily: 'monospace'
+        });
+        term.open(document.getElementById('terminal'));
+        term.write('[系统] 正在建立 WSS 实时交互安全连接...\\r\\n');
 
-        ws.onopen = () => { output.innerText = '[系统] 成功连接中转服务器。\\n'; };
-        ws.onmessage = (e) => { output.innerText += e.data + '\\n'; output.scrollTop = output.scrollHeight; };
-        ws.onclose = () => { output.innerText += '[系统] WSS 连接已断开。\\n'; };
+        ws.onopen = () => { term.reset(); };
+        
+        // 💡 收到内网发来的带颜色转义字符的数据，直接交给 Xterm.js 完美洗白和渲染
+        ws.onmessage = (e) => { term.write(e.data); };
+        ws.onclose = () => { term.write('\\r\\n[系统] WSS 连接已断开。\\r\\n'); };
 
-        cmdInput.addEventListener('keydown', (e) => {
-          if(e.key === 'Enter') {
-            if(!cmdInput.value.trim()) return;
-            ws.send(cmdInput.value);
-            output.innerText += '\\n> ' + cmdInput.value + '\\n';
-            cmdInput.value = '';
+        // 监听用户的键盘输入，实现捕获单个按键（包括回车、退格、Ctrl+C等）
+        term.onData(data => {
+          if (ws.readyState === WebSocket.OPEN) {
+            // 实时发送按键字节，不用再点网页上的发送按钮了，真正的丝滑体验
+            ws.send(data); 
           }
         });
       </script>
     </body>
     </html>
-    `;
+  `;
 }
