@@ -75,8 +75,8 @@ function renderAdminHTML(token) {
     <html>
     <head>
       <title>Render Professional WebSSH</title>
-      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/css/xterm.min.css" />
-      <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.3.0/lib/xterm.min.js"></script>
+      <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/xterm/5.5.0/xterm.min.css" />
+      <script src="https://cdn.bootcdn.net/ajax/libs/xterm/5.5.0/xterm.js"></script>
     </head>
     <body style="background:#111; margin:0; padding:10px; height:100vh; box-sizing:border-box;">
       <div id="terminal" style="height:100%;"></div>
