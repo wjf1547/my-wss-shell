@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const url = require('url');
 
-const EXPECTED_TOKEN = "你的自定义强密码_SECRET_TOKEN";
+const EXPECTED_TOKEN = "a1515629";
 const PORT = process.env.PORT || 3000;
 
 // 创建底层的 HTTP 服务器
