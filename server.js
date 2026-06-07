@@ -20,94 +20,235 @@ const server = http.createServer((req, res) => {
 // 创建 WebSocket 服务器挂载到 HTTP 上
 const wss = new WebSocket.Server({ server });
 
-let agentSocket = null;
-let adminSocket = null;
+// 💡 核心改动：使用 Map 存储多设备 [deviceId -> socket]
+const agentSockets = new Map();
+// 管理网页端连接 [adminSocket -> 绑定管理的 deviceId]
+const adminBindings = new Map();
 
 wss.on('connection', (ws, req) => {
     const location = url.parse(req.url, true);
     const token = location.query.token;
     const role = location.query.role; // 'agent' 或 'admin'
+    const deviceId = location.query.deviceId; // 设备的唯一标识
 
     if (token !== EXPECTED_TOKEN) {
         ws.close(4001, "Unauthorized");
         return;
     }
 
+    // ==================== 1. AGENT (内网设备) 处理逻辑 ====================
     if (role === 'agent') {
-        agentSocket = ws;
-        console.log("内网 Agent 成功建立 WSS 长连接");
-        if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-            adminSocket.send("[系统] 内网 Agent 已上线！开始输入命令：");
+        if (!deviceId) {
+            ws.close(4002, "Missing deviceId");
+            return;
         }
-    } else if (role === 'admin') {
-        adminSocket = ws;
-        console.log("网页 Admin 成功建立 WSS 长连接");
-        if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
-            adminSocket.send("[系统] 内网 Agent 在线，准备就绪。");
-        } else {
-            adminSocket.send("[警告] 内网 Agent 当前离线！");
-        }
+        
+        // 存储或覆盖旧的同名设备连接
+        agentSockets.set(deviceId, ws);
+        console.log(`内网 Agent [${deviceId}] 成功建立 WSS 长连接`);
+        
+        // 广播通知所有网页端刷新设备列表
+        broadcastDeviceList();
+    } 
+    // ==================== 2. ADMIN (网页控制台) 处理逻辑 ====================
+    else if (role === 'admin') {
+        console.log("网页 Admin 已连接，等待选择设备...");
+        // 刚连接时，先发送当前在线的设备列表
+        sendDeviceListToAdmin(ws);
     }
 
-    // 核心流交换：纯内存 WSS 管道中转，坚决不轮询
+    // ==================== 3. 核心流交换 (数据中转) ====================
     ws.on('message', (message) => {
         const data = message.toString();
-        if (role === 'admin' && agentSocket && agentSocket.readyState === WebSocket.OPEN) {
-            agentSocket.send(data); // 网页命令秒发给内网
-        } else if (role === 'agent' && adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-            adminSocket.send(data); // 内网结果秒发给网页
+
+        if (role === 'admin') {
+            // 💡 特殊指令：网页端通过发送特定 JSON 来切换/选择设备
+            try {
+                const json = JSON.parse(data);
+                if (json.type === 'SELECT_DEVICE') {
+                    const targetId = json.deviceId;
+                    if (agentSockets.has(targetId)) {
+                        adminBindings.set(ws, targetId); // 将当前网页连接与目标设备绑定
+                        ws.send(`\r\n[系统] 已成功连接到设备: ${targetId}\r\n`);
+                        // 告知 Agent 触发一次刷新，或者让终端准备好（可选）
+                    } else {
+                        ws.send(`\r\n[错误] 设备 ${targetId} 不在线！\r\n`);
+                    }
+                    return;
+                }
+                if (json.type === 'GET_DEVICES') {
+                    sendDeviceListToAdmin(ws);
+                    return;
+                }
+            } catch (e) {
+                // 不是 JSON，说明是普通的键盘输入字节流
+            }
+
+            // 获取当前网页端绑定的目标设备
+            const targetDeviceId = adminBindings.get(ws);
+            const targetAgent = agentSockets.get(targetDeviceId);
+            if (targetAgent && targetAgent.readyState === WebSocket.OPEN) {
+                targetAgent.send(data); // 网页命令秒发给对应内网 Agent
+            }
+        } else if (role === 'agent') {
+            // 内网结果秒发给**所有绑定了该设备**的网页端
+            adminBindings.forEach((boundDeviceId, adminSocket) => {
+                if (boundDeviceId === deviceId && adminSocket.readyState === WebSocket.OPEN) {
+                    adminSocket.send(data);
+                }
+            });
         }
     });
 
     ws.on('close', () => {
-        if (role === 'agent') agentSocket = null;
-        if (role === 'admin') adminSocket = null;
+        if (role === 'agent') {
+            console.log(`内网 Agent [${deviceId}] 断开连接`);
+            agentSockets.delete(deviceId);
+            broadcastDeviceList(); // 广播通知设备下线
+        }
+        if (role === 'admin') {
+            adminBindings.delete(ws);
+        }
     });
 });
 
+// 向指定网页端发送当前在线设备列表
+function sendDeviceListToAdmin(adminSocket) {
+    if (adminSocket.readyState === WebSocket.OPEN) {
+        const deviceIds = Array.from(agentSockets.keys());
+        adminSocket.send(JSON.stringify({ type: 'DEVICE_LIST', devices: deviceIds }));
+    }
+}
+
+// 广播给所有网页端最新的设备列表
+function broadcastDeviceList() {
+    adminBindings.forEach((_, adminSocket) => {
+        sendDeviceListToAdmin(adminSocket);
+    });
+}
+
 server.listen(PORT, () => {
-    console.log(`常驻容器中转端已在端口 ${PORT} 启动...`);
+    console.log(`常驻容器多设备中转端已在端口 ${PORT} 启动...`);
 });
 
+// 网页端 HTML 模板：集成了设备选择列表和 Xterm.js 终端
 function renderAdminHTML(token) {
   return `
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Render Professional WebSSH</title>
+      <title>Multi-Device WebSSH</title>
       <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/xterm/5.5.0/xterm.min.css" />
       <script src="https://cdn.bootcdn.net/ajax/libs/xterm/5.5.0/xterm.js"></script>
+      <style>
+        body { background:#111; margin:0; padding:10px; height:100vh; box-sizing:border-box; display: flex; flex-direction: column; font-family: sans-serif; }
+        #top-bar { display: flex; background: #222; padding: 10px; border-bottom: 1px solid #333; align-items: center; gap: 10px; }
+        label, #device-select { color: #fff; font-size: 14px; }
+        #device-select { background: #333; color: #fff; border: 1px solid #555; padding: 5px; border-radius: 4px; }
+        #connect-btn { background: #007acc; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+        #connect-btn:hover { background: #0062a3; }
+        #terminal-container { flex: 1; margin-top: 10px; overflow: hidden; }
+        #terminal { height: 100%; }
+      </style>
     </head>
-    <body style="background:#111; margin:0; padding:10px; height:100vh; box-sizing:border-box;">
-      <div id="terminal" style="height:100%;"></div>
+    <body>
+      <div id="top-bar">
+        <label for="device-select">选择目标设备:</label>
+        <select id="device-select">
+          <option value="">-- 请选择设备 --</option>
+        </select>
+        <button id="connect-btn" onclick="selectDevice()">连接终端</button>
+      </div>
+
+      <div id="terminal-container">
+        <div id="terminal"></div>
+      </div>
 
       <script>
         const token = "${token}";
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(\`\${protocol}//\${location.host}?role=admin&token=\${token}\`);
         
-        // 初始化专业终端
-        const term = new Terminal({
-          cursorBlink: true,
-          theme: { background: '#111111', foreground: '#00ff00' },
-          fontFamily: 'monospace'
-        });
-        term.open(document.getElementById('terminal'));
-        term.write('[系统] 正在建立 WSS 实时交互安全连接...\\r\\n');
+        let term = null;
+        let isTerminalInitialized = false;
 
-        ws.onopen = () => { term.reset(); };
+        // 初始化 Xterm.js
+        function initTerminal() {
+          if (isTerminalInitialized) return;
+          term = new Terminal({
+            cursorBlink: true,
+            theme: { background: '#111111', foreground: '#00ff00' },
+            fontFamily: 'monospace'
+          });
+          term.open(document.getElementById('terminal'));
+          
+          // 监听终端输入并发送
+          term.onData(data => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(data); 
+            }
+          });
+          isTerminalInitialized = true;
+        }
+
+        ws.onopen = () => {
+          console.log("已连接中转服务器，正在拉取设备列表...");
+        };
         
-        // 💡 收到内网发来的带颜色转义字符的数据，直接交给 Xterm.js 完美洗白和渲染
-        ws.onmessage = (e) => { term.write(e.data); };
-        ws.onclose = () => { term.write('\\r\\n[系统] WSS 连接已断开。\\r\\n'); };
-
-        // 监听用户的键盘输入，实现捕获单个按键（包括回车、退格、Ctrl+C等）
-        term.onData(data => {
-          if (ws.readyState === WebSocket.OPEN) {
-            // 实时发送按键字节，不用再点网页上的发送按钮了，真正的丝滑体验
-            ws.send(data); 
+        ws.onmessage = (e) => {
+          // 优先判断是不是控制信令（JSON）
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'DEVICE_LIST') {
+              updateDeviceSelect(msg.devices);
+              return;
+            }
+          } catch(err) {
+            // 不是 JSON 则是终端字节流，直接交给 Xterm
           }
-        });
+
+          if (term) {
+            term.write(e.data);
+          }
+        };
+
+        ws.onclose = () => { 
+          if (term) term.write('\\r\\n[系统] WSS 连接已断开。\\r\\n'); 
+        };
+
+        // 更新下拉框列表
+        function updateDeviceSelect(devices) {
+          const select = document.getElementById('device-select');
+          const currentSelected = select.value;
+          
+          // 清空除第一项外的内容
+          select.innerHTML = '<option value="">-- 请选择设备 --</option>';
+          
+          devices.forEach(id => {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.innerText = id;
+            if (id === currentSelected) opt.selected = true;
+            select.appendChild(opt);
+          });
+        }
+
+        // 点击连接设备按钮
+        function selectDevice() {
+          const select = document.getElementById('device-select');
+          const deviceId = select.value;
+          if (!deviceId) {
+            alert("请先选择一个在线设备！");
+            return;
+          }
+          
+          initTerminal();
+          term.reset();
+          term.write(\`[系统] 正在切换至设备 \${deviceId}...\\r\\n\`);
+          
+          // 发送选择设备指令
+          ws.send(JSON.stringify({ type: 'SELECT_DEVICE', deviceId: deviceId }));
+        }
       </script>
     </body>
     </html>
