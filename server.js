@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const url = require('url');
 
-const EXPECTED_TOKEN = "a1515629";
+const EXPECTED_TOKEN = process.env.EXPECTED_TOKEN;
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer((req, res) => {
